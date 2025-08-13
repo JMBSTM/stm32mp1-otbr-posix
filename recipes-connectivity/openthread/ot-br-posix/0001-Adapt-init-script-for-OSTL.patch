@@ -1,0 +1,341 @@
+From 0b40e9c39111928cc127cdaba4263e1d57e4c37a Mon Sep 17 00:00:00 2001
+From: Jean-Marc BOUCHE <jean-marc.bouche@st.com>
+Date: Mon, 17 Nov 2025 11:21:27 +0100
+Subject: [PATCH] Adapt init script for OSTL
+
+---
+ script/_initrc      | 12 +++---
+ script/_nat64       | 99 ++++++++++++++++++++++++++++++++++++++++++++-
+ script/_otbr        | 88 ----------------------------------------
+ script/_rt_tables   |  6 ++-
+ script/_sudo_extend |  2 +
+ script/_swapfile    |  2 +
+ 6 files changed, 113 insertions(+), 96 deletions(-)
+
+diff --git a/script/_initrc b/script/_initrc
+index 2ff3c849..b6ddba3d 100644
+--- a/script/_initrc
++++ b/script/_initrc
+@@ -104,6 +104,13 @@ if [[ ! ${PLATFORM+x} ]]; then
+ fi
+ echo "Current platform is $PLATFORM"
+ 
++if [ "$PLATFORM" = "openstlinux-weston" ]; then
++    # For OpenSTLinux, we run the program with root account
++    echo "Disable sudo for $PLATFORM"
++    sudo() { "$@"; }
++    export -f sudo
++fi
++
+ # The DHCPV6_PD feature requires IPv6 features in dhcpcd but RIO
+ # is not supported within dhcpcd.
+ with BORDER_ROUTING && with DHCPV6_PD && die "BORDER_ROUTING and DHCPV6_PD cannot coexist!"
+@@ -114,11 +121,6 @@ with BORDER_ROUTING && with NETWORK_MANAGER && die "BORDER_ROUTING and NETWORK_M
+ STAGE_DIR=$PWD/stage
+ BUILD_DIR=$PWD/build
+ 
+-[[ -d $STAGE_DIR ]] || mkdir -v -p "$STAGE_DIR"
+-[[ -d $BUILD_DIR ]] || mkdir -v -p "$BUILD_DIR"
+-
+-export PATH=$STAGE_DIR/usr/bin:$STAGE_DIR/usr/sbin:$PATH
+-
+ TASKNAME=$(basename "$0")
+ BEFORE_HOOK=examples/platforms/$PLATFORM/before_$TASKNAME
+ AFTER_HOOK=examples/platforms/$PLATFORM/after_$TASKNAME
+diff --git a/script/_nat64 b/script/_nat64
+index 521c4d22..89d62ec8 100644
+--- a/script/_nat64
++++ b/script/_nat64
+@@ -39,6 +39,8 @@ TAYGA_TUN_V6_ADDR=fdaa:bb:1::2
+ NAT64_PREFIX=64:ff9b::/96
+ DYNAMIC_POOL="${NAT64_DYNAMIC_POOL:-192.168.255.0/24}"
+ NAT44_SERVICE=/etc/init.d/otbr-nat44
++NAT44_OSTL_SERVICE=/etc/systemd/system/otbr-nat44.service
++NAT44_OSTL_HELPER_SCRIPT=/usr/sbin/otbr-nat44-systemd.sh
+ WLAN_IFNAMES="${INFRA_IF_NAME:-eth0}"
+ THREAD_IF="${THREAD_IF:-wpan0}"
+ 
+@@ -187,6 +189,80 @@ EOF
+     fi
+ }
+ 
++nat44_ostl_install()
++{
++    sudo tee $NAT44_OSTL_SERVICE <<EOF
++[Unit]
++Description=iptables NAT44 for OpenThread Border Router
++After=network.target
++Wants=network.target
++
++[Service]
++Type=oneshot
++RemainAfterExit=yes
++ExecStart=/usr/local/sbin/otbr-nat44-systemd.sh start
++ExecStop=/usr/local/sbin/otbr-nat44-systemd.sh stop
++
++[Install]
++WantedBy=multi-user.target
++EOF
++
++    sudo tee $NAT44_OSTL_HELPER_SCRIPT <<EOF
++#! /bin/sh
++#  Copyright (C) 2025, STMicroelectronics - All Rights Reserved
++
++case "\$1" in
++    start)
++EOF
++    if [ "$NAT64_SERVICE" = tayga ]; then
++        # Although Tayga itself also configures a NAT44 iptables route, this iptables route is used with Tayga
++        # due to some history reason. It might be removed when native NAT64 service is ready.
++        for IFNAME in $WLAN_IFNAMES; do
++            echo "        iptables -t nat -A POSTROUTING -o $IFNAME -j MASQUERADE" | sudo tee -a $NAT44_OSTL_HELPER_SCRIPT
++        done
++    else
++        # Just a random fwmark bits.
++        echo "        iptables -t mangle -A PREROUTING -i $THREAD_IF -j MARK --set-mark 0x1001" | sudo tee -a $NAT44_OSTL_HELPER_SCRIPT
++        echo "        iptables -t nat -A POSTROUTING -m mark --mark 0x1001 -j MASQUERADE" | sudo tee -a $NAT44_OSTL_HELPER_SCRIPT
++        for IFNAME in $WLAN_IFNAMES; do
++            echo "        iptables -t filter -A FORWARD -o $IFNAME -j ACCEPT" | sudo tee -a $NAT44_OSTL_HELPER_SCRIPT
++            echo "        iptables -t filter -A FORWARD -i $IFNAME -j ACCEPT" | sudo tee -a $NAT44_OSTL_HELPER_SCRIPT
++        done
++    fi
++    sudo tee -a $NAT44_HELPER_SCRIPT <<EOF
++        ;;
++    stop)
++EOF
++    if [ "$NAT64_SERVICE" = tayga ]; then
++        # Although Tayga itself also configures a NAT44 iptables route, this iptables route is used with Tayga
++        # due to some history reason. It might be removed when native NAT64 service is ready.
++        for IFNAME in $WLAN_IFNAMES; do
++            echo "        iptables -t nat -D POSTROUTING -o $IFNAME -j MASQUERADE" | sudo tee -a $NAT44_OSTL_HELPER_SCRIPT
++        done
++    else
++        # Just a random fwmark bits.
++        echo "        iptables -t mangle -D PREROUTING -i $THREAD_IF -j MARK --set-mark 0x1001" | sudo tee -a $NAT44_OSTL_HELPER_SCRIPT
++        echo "        iptables -t nat -D POSTROUTING -m mark --mark 0x1001 -j MASQUERADE" | sudo tee -a $NAT44_OSTL_HELPER_SCRIPT
++        for IFNAME in $WLAN_IFNAMES; do
++            echo "        iptables -t filter -D FORWARD -o $IFNAME -j ACCEPT" | sudo tee -a $NAT44_OSTL_HELPER_SCRIPT
++            echo "        iptables -t filter -D FORWARD -i $IFNAME -j ACCEPT" | sudo tee -a $NAT44_OSTL_HELPER_SCRIPT
++        done
++    fi
++    sudo tee -a $NAT44_HELPER_SCRIPT <<EOF
++        ;;
++    *)
++        echo "Usage: \$0 start|stop" >&2
++        exit 3
++        ;;
++esac
++EOF
++    sudo chmod a+x $NAT44_OSTL_HELPER_SCRIPT
++    if have systemctl; then
++        sudo systemctl enable otbr-nat44 || die 'Unable to enable nat44 service!'
++        sudo systemctl start otbr-nat44 || die 'Failed to start nat44 service!'
++    fi
++}
++
+ nat44_uninstall()
+ {
+     if have systemctl; then
+@@ -200,6 +276,15 @@ nat44_uninstall()
+     test ! -f $NAT44_SERVICE || sudo rm $NAT44_SERVICE
+ }
+ 
++nat44_ostl_uninstall()
++{
++    if have systemctl; then
++        sudo systemctl disable otbr-nat44 || true
++    fi
++    test ! -f $NAT44_OSTL_SERVICE       || sudo rm $NAT44_OSTL_SERVICE
++    test ! -f $NAT44_OSTL_HELPER_SCRIPT || sudo rm $NAT44_OSTL_HELPER_SCRIPT
++}
++
+ nat44_start()
+ {
+     if with DOCKER; then
+@@ -226,7 +311,12 @@ nat64_install()
+         tayga_install
+     fi
+ 
+-    nat44_install
++    if [ "$PLATFORM" = openstlinux-weston ];
++    then
++        nat44_ostl_uninstall
++    else
++        nat44_install
++    fi
+ }
+ 
+ nat64_uninstall()
+@@ -239,7 +329,12 @@ nat64_uninstall()
+         tayga_uninstall
+     fi
+ 
+-    nat44_uninstall
++    if [ "$PLATFORM" = openstlinux-weston ];
++    then
++        nat44_ostl_uninstall
++    else
++        nat44_uninstall
++    fi
+ }
+ 
+ nat64_start()
+diff --git a/script/_otbr b/script/_otbr
+index dbccc73c..2ca4e056 100644
+--- a/script/_otbr
++++ b/script/_otbr
+@@ -48,12 +48,6 @@ otbr_uninstall()
+     fi
+     sudo killall otbr-web otbr-agent || true
+ 
+-    (
+-        if cd "${OTBR_TOP_BUILDDIR}"; then
+-            # shellcheck disable=SC2024
+-            sudo xargs rm <install_manifests.txt || true
+-        fi
+-    )
+     if have systemctl; then
+         sudo systemctl daemon-reload
+     fi
+@@ -61,88 +55,6 @@ otbr_uninstall()
+ 
+ otbr_install()
+ {
+-    local otbr_options=()
+-
+-    if [[ ${OTBR_OPTIONS} ]]; then
+-        read -r -a otbr_options <<<"${OTBR_OPTIONS}"
+-    fi
+-
+-    otbr_options=(
+-        "-DBUILD_TESTING=OFF"
+-        "-DCMAKE_INSTALL_PREFIX=/usr"
+-        "-DOTBR_DBUS=ON"
+-        "-DOTBR_DNSSD_DISCOVERY_PROXY=ON"
+-        "-DOTBR_SRP_ADVERTISING_PROXY=ON"
+-        "-DOTBR_INFRA_IF_NAME=${INFRA_IF_NAME}"
+-        "-DOTBR_MDNS=${OTBR_MDNS:=mDNSResponder}"
+-        # Force re-evaluation of version strings
+-        "-DOTBR_VERSION="
+-        "-DOT_PACKAGE_VERSION="
+-        "${otbr_options[@]}"
+-    )
+-
+-    if with WEB_GUI; then
+-        otbr_options+=("-DOTBR_WEB=ON")
+-    fi
+-
+-    if with BORDER_ROUTING; then
+-        otbr_options+=(
+-            "-DOTBR_BORDER_ROUTING=ON"
+-        )
+-    fi
+-
+-    if with REST_API; then
+-        otbr_options+=("-DOTBR_REST=ON")
+-    fi
+-
+-    if with BACKBONE_ROUTER; then
+-        otbr_options+=(
+-            "-DOTBR_BACKBONE_ROUTER=ON"
+-        )
+-        if [[ ${REFERENCE_DEVICE} == "1" ]]; then
+-            otbr_options+=(
+-                "-DOTBR_DUA_ROUTING=ON"
+-            )
+-        fi
+-    fi
+-
+-    if [[ ${REFERENCE_DEVICE} == "1" ]]; then
+-        otbr_options+=(
+-            "-DOTBR_NO_AUTO_ATTACH=1"
+-            "-DOT_REFERENCE_DEVICE=ON"
+-            "-DOT_DHCP6_CLIENT=ON"
+-            "-DOT_DHCP6_SERVER=ON"
+-        )
+-    fi
+-
+-    if with NAT64 && [[ ${NAT64_SERVICE-} == "openthread" ]]; then
+-        otbr_options+=(
+-            "-DOTBR_NAT64=ON"
+-            "-DOT_POSIX_NAT64_CIDR=${NAT64_DYNAMIC_POOL:-192.168.255.0/24}"
+-        )
+-    fi
+-
+-    if with NAT64; then
+-        otbr_options+=(
+-            "-DOTBR_DNS_UPSTREAM_QUERY=ON"
+-        )
+-    fi
+-
+-    if with FIREWALL; then
+-        otbr_options+=(
+-            "-DOT_FIREWALL=ON"
+-        )
+-    else
+-        otbr_options+=(
+-            "-DOT_FIREWALL=OFF"
+-        )
+-    fi
+-
+-    (./script/cmake-build "${otbr_options[@]}" \
+-        && cd "${OTBR_TOP_BUILDDIR}" \
+-        && ninja \
+-        && sudo ninja install)
+-
+     if have systemctl; then
+         sudo systemctl reload dbus
+         sudo systemctl daemon-reload
+diff --git a/script/_rt_tables b/script/_rt_tables
+index e6379838..6a1cab45 100644
+--- a/script/_rt_tables
++++ b/script/_rt_tables
+@@ -34,7 +34,7 @@ rt_tables_uninstall()
+ {
+     with BACKBONE_ROUTER || return 0
+ 
+-    sudo sed -i.bak '/88\s\+openthread/d' /etc/iproute2/rt_tables
++    sudo sed -i.bak '/88\s\+openthread/d' /etc/iproute2/rt_tables || true
+ }
+ 
+ rt_tables_install()
+@@ -43,6 +43,10 @@ rt_tables_install()
+ 
+     rt_tables_uninstall
+ 
++    if [[ ! -d /etc/iproute2 ]]; then
++	sudo mkdir /etc/iproute2
++    fi
++
+     sudo sh -c 'echo "88 openthread" >>/etc/iproute2/rt_tables'
+ 
+     # Increase ancillary buffer size to allow for a larger number of multicast groups
+diff --git a/script/_sudo_extend b/script/_sudo_extend
+index 5720e1a5..fe819b82 100644
+--- a/script/_sudo_extend
++++ b/script/_sudo_extend
+@@ -43,6 +43,8 @@ SUDO_EXTEND_TIME_AMOUNT=120
+ 
+ extend_sudo_timeout()
+ {
++    without NO_SUDO || return 0
++
+     local _why
+     _why="Disabled"
+ 
+diff --git a/script/_swapfile b/script/_swapfile
+index 5af60b26..47963dea 100644
+--- a/script/_swapfile
++++ b/script/_swapfile
+@@ -81,6 +81,8 @@ enable_swapfile()
+ 
+ setup_swapfile()
+ {
++    without NO_SWAPFILE || return 0
++
+     if ${SWAP_REQUIRED}; then
+         echo "Swapfile: Creating..."
+         delete_old_swapfile
+-- 
+2.25.1
+
