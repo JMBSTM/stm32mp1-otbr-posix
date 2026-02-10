@@ -58,7 +58,7 @@ You can install them individually or by package group.
 
 ### Prerequisites
 
-Flash the OpenSTLinux Starter Package on the SDCard of your STM32MPU board. For OpenSTLinux ecosystem release v6.1.0:
+Flash the OpenSTLinux Starter Package on the SDCard of your STM32MPU board. For OpenSTLinux ecosystem release v6.2.0:
 
 [Select and follow the correct Starter Package procedure based on the board used](https://wiki.st.com/stm32mpu/wiki/Category:Starter_Package)
 
@@ -78,7 +78,7 @@ Your board has an internet connection either through the network cable or throug
 
 Once the STM32MPU board is booted, execute the following commands in the console to configure the X-LINUX-OTBR_POSIX OpenSTLinux package repository:
 
-For ecosystem release v6.1.0:
+For ecosystem release v6.2.0:
 
 Move to the apt archives directory
 ```bash
@@ -87,7 +87,7 @@ Board $> cd /var/cache/apt/archives
 
 Retrieve the specific package apt-openstlinux-x-linux-otbr-posix_1.0_all.deb:
 ```bash
-Board $> wget http://extra.packages.openstlinux.st.com/OTBR_POSIX/6.1/pool/config/a/apt-openstlinux-x-linux-otbr-posix/apt-openstlinux-x-linux-otbr-posix_1.0_all.deb
+Board $> wget http://extra.packages.openstlinux.st.com/OTBR_POSIX/6.2/pool/config/a/apt-openstlinux-x-linux-otbr-posix/apt-openstlinux-x-linux-otbr-posix_1.0_all.deb
 ```
 
 Install this package:
